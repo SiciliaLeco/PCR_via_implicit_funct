@@ -52,6 +52,14 @@ class SolveRegistration(torch.nn.Module):
 
 
     def IC_algo(self, g0, ndf, p0, p1, maxiter, xtol, isTest = False):
+        #TODO: testing part
+        batch_size = p0.size(0)
+        self.last_err = None
+        g = g0
+        self.g_series = torch.zeros(maxiter + 1, *g0.size(), dtype=g0.dtype)
+        self.g_series[0] = g0.clone()
+
+        # task 2
         dist = self.calculate_dist(ndf, p1)
         dt = self.dt.to(p0).expand(self.batch_size, 6)  # convert to the type of p0. [B, 6] #预备delta t，也就是变换量
         J = self.approx_Jac(dist, dt) # [B x N x 6]
@@ -63,7 +71,19 @@ class SolveRegistration(torch.nn.Module):
         itr = 0
         r = None
         for iter in range(maxiter):
-            
+            p = self.transform(g.unsqueeze(1), p1) # B x N x 3
+            dist = self.calculate_dist(ndf, p) # B x N
+            dx = -pinv.bmm(dist.unsqueeze(-1)).view(batch_size, 6)
+            check = dx.norm(p=2, dim=1, keepdim=True).max()
+            if float(check) < xtol:
+                if itr == 0:
+                    self.last_err = 0 # no update
+                break
+            g = self.update_T(g, dx)
+            self.g_series[itr + 1] = g.clone()
+            self.prev_r = r
+
+        return r, g
 
 
     def estimate_T(self, p0, p1, coords, inputs, maxiter=5, xtol=1.0e-7, p0_zero_mean=True, p1_zero_mean=True):
@@ -74,10 +94,49 @@ class SolveRegistration(torch.nn.Module):
         :param p0_zero_mean: True: normanize p0 before IC algorithm
         :param p1_zero_mean: True: normanize p1 before IC algorithm
         """
+        a0 = torch.eye(4).view(1, 4, 4).expand(p0.size(0), 4, 4).to(p0)  # [B, 4, 4]
+        a1 = torch.eye(4).view(1, 4, 4).expand(p1.size(0), 4, 4).to(p1)  # [B, 4, 4]
+        # normalization
+        if p0_zero_mean:
+            p0_m = p0.mean(dim=1)  # [B, N, 3] -> [B, 3]
+            a0 = a0.clone()
+            a0[:, 0:3, 3] = p0_m
+            q0 = p0 - p0_m.unsqueeze(1) # [B, N, 3]
+        else:
+            q0 = p0
+        if p1_zero_mean:
+            p1_m = p1.mean(dim=1)  # [B, N, 3] -> [B, 3]
+            a1 = a1.clone()
+            a1[:, 0:3, 3] = -p1_m
+            q1 = p1 - p1_m.unsqueeze(1)
+        else:
+            q1 = p1
+
         isTest = False
-        g0 = torch.eye(4).to(p0).view(1, 4, 4).expand(p0.size(0), 4, 4).contiguous()
+        g0 = torch.eye(4).to(q0).view(1, 4, 4).expand(q0.size(0), 4, 4).contiguous() # B x 4 x 4
         ndf = self.ndf_model(coords, inputs)
-        self.IC_algo(g0, ndf, p1, maxiter, xtol, isTest)
+        r, g = self.IC_algo(g0, ndf, q1, maxiter, xtol, isTest)
+        self.g = g
+
+        # renormalization
+        if p0_zero_mean or p1_zero_mean:
+            # output' = trans(p0_m) * output * trans(-p1_m)
+            #        = [I, p0_m;] * [R, t;] * [I, -p1_m;]
+            #          [0, 1    ]   [0, 1 ]   [0,  1    ]
+            est_g = self.g
+            if p0_zero_mean:
+                est_g = a0.to(est_g).bmm(est_g)
+            if p1_zero_mean:
+                est_g = est_g.bmm(a1.to(est_g))
+            self.g = est_g
+
+            est_gs = self.g_series  # [M, B, 4, 4]
+            if p0_zero_mean:
+                est_gs = a0.unsqueeze(0).contiguous().to(est_gs).matmul(est_gs)
+            if p1_zero_mean:
+                est_gs = est_gs.matmul(a1.unsqueeze(0).contiguous().to(est_gs))
+            self.g_series = est_gs
+
 
     @staticmethod
     def comp(g, igt):
