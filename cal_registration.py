@@ -9,9 +9,9 @@ import se_math.invmat as invmat
 
 # B: batch_size N: num_points
 class SolveRegistration(torch.nn.Module):
-    def __init__(self, model, isTest=False):
+    def __init__(self, mode=None, isTest=False):
         super().__init__()
-        self.ndf_model = model
+        # self.ndf_model = model
         # functions for registration calculate
         self.inverse = invmat.InvMatrix.apply
         self.exp = se3.Exp  # [B, 6] -> [B, 4, 4]
@@ -27,7 +27,7 @@ class SolveRegistration(torch.nn.Module):
         self.g_series = None  # for debug purpose
         self.prev_r = None
         self.g = None  # estimated transformation T
-        self.isTest = isTest # whether it is testing
+        self.isTest = isTest  # whether it is testing
 
         self.batch_size = 10
 
@@ -41,18 +41,17 @@ class SolveRegistration(torch.nn.Module):
         :param p1 [B x N x 3]
         return: distance ndf - p1 [B x N]
         """
-        pj = 1/3 * p1.sum(dim=2) # B x N
+        pj = 1 / 3 * p1.sum(dim=2)  # B x N
         distance = pj - ndf
-        return distance # B x N
+        return distance  # B x N
 
     def approx_Jac(self, r, dt):
         r_ = r.unsqueeze(-1)
         dt_ = dt.unsqueeze(-2)
-        return r_ / dt_ # [B x N x 6]
+        return r_ / dt_  # [B x N x 6]
 
-
-    def IC_algo(self, g0, ndf, p0, p1, maxiter, xtol, isTest = False):
-        #TODO: testing part
+    def IC_algo(self, g0, ndf, p0, p1, maxiter, xtol, isTest=False):
+        # TODO: testing part
         batch_size = p0.size(0)
         self.last_err = None
         g = g0
@@ -62,22 +61,28 @@ class SolveRegistration(torch.nn.Module):
         # task 2
         dist = self.calculate_dist(ndf, p1)
         dt = self.dt.to(p0).expand(self.batch_size, 6)  # convert to the type of p0. [B, 6] #预备delta t，也就是变换量
-        J = self.approx_Jac(dist, dt) # [B x N x 6]
-        Jt = J.transpose(1, 2) # [B x 6 x N]
-        H = Jt.bmm(J) # [B x 6 x 6]
-        B = self.inverse(H)
-        pinv = B.bmm(Jt) # [B x 6 x N]
+        J = self.approx_Jac(dist, dt)  # [B x N x 6]
+        try:
+            Jt = J.transpose(1, 2)  # [B, 6, K]
+            H = Jt.bmm(J)  # [B, 6, 6]
+            B = self.inverse(H)
+            pinv = B.bmm(Jt)  # [B, 6, K]
+        except RuntimeError as err:
+            # singular...?
+            self.last_err = err
+            r = dist
+            return r, g
 
         itr = 0
         r = None
         for iter in range(maxiter):
-            p = self.transform(g.unsqueeze(1), p1) # B x N x 3
-            dist = self.calculate_dist(ndf, p) # B x N
+            p = self.transform(g.unsqueeze(1), p1)  # B x N x 3
+            dist = self.calculate_dist(ndf, p)  # B x N
             dx = -pinv.bmm(dist.unsqueeze(-1)).view(batch_size, 6)
             check = dx.norm(p=2, dim=1, keepdim=True).max()
             if float(check) < xtol:
                 if itr == 0:
-                    self.last_err = 0 # no update
+                    self.last_err = 0  # no update
                 break
             g = self.update_T(g, dx)
             self.g_series[itr + 1] = g.clone()
@@ -85,8 +90,7 @@ class SolveRegistration(torch.nn.Module):
 
         return r, g
 
-
-    def estimate_T(self, p0, p1, coords, inputs, maxiter=5, xtol=1.0e-7, p0_zero_mean=True, p1_zero_mean=True):
+    def estimate_T(self, p0, p1, ndf, maxiter=5, xtol=1.0e-7, p0_zero_mean=True, p1_zero_mean=True):
         # TODO: 将df的来源改为ndf的训练结果
         """
         :param maxiter: maximum iteration
@@ -101,7 +105,7 @@ class SolveRegistration(torch.nn.Module):
             p0_m = p0.mean(dim=1)  # [B, N, 3] -> [B, 3]
             a0 = a0.clone()
             a0[:, 0:3, 3] = p0_m
-            q0 = p0 - p0_m.unsqueeze(1) # [B, N, 3]
+            q0 = p0 - p0_m.unsqueeze(1)  # [B, N, 3]
         else:
             q0 = p0
         if p1_zero_mean:
@@ -113,9 +117,9 @@ class SolveRegistration(torch.nn.Module):
             q1 = p1
 
         isTest = False
-        g0 = torch.eye(4).to(q0).view(1, 4, 4).expand(q0.size(0), 4, 4).contiguous() # B x 4 x 4
-        ndf = self.ndf_model(coords, inputs)
-        r, g = self.IC_algo(g0, ndf, q1, maxiter, xtol, isTest)
+        g0 = torch.eye(4).to(q0).view(1, 4, 4).expand(q0.size(0), 4, 4).contiguous()  # B x 4 x 4
+        # ndf = self.ndf_model(coords, inputs)
+        r, g = self.IC_algo(g0, ndf, q0, q1, maxiter, xtol, isTest)
         self.g = g
 
         # renormalization
@@ -137,6 +141,7 @@ class SolveRegistration(torch.nn.Module):
                 est_gs = est_gs.matmul(a1.unsqueeze(0).contiguous().to(est_gs))
             self.g_series = est_gs
 
+        return r
 
     @staticmethod
     def comp(g, igt):
@@ -148,5 +153,8 @@ class SolveRegistration(torch.nn.Module):
         I = torch.eye(4).to(A).view(1, 4, 4).expand(A.size(0), 4, 4)
         return torch.nn.functional.mse_loss(A, I, reduction='mean') * 16
 
-
-
+    @staticmethod
+    def rsq(r):
+        # |r| should be 0
+        z = torch.zeros_like(r)
+        return torch.nn.functional.mse_loss(r, z, reduction='sum')

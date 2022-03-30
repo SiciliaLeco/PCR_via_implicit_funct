@@ -175,9 +175,6 @@ class SolveRegistration(torch.nn.Module):
 
         # re-normalization
         if p0_zero_mean or p1_zero_mean:
-            # output' = trans(p0_m) * output * trans(-p1_m)
-            #        = [I, p0_m;] * [R, t;] * [I, -p1_m;]
-            #          [0, 1    ]   [0, 1 ]   [0,  1    ]
             est_g = self.g
             if p0_zero_mean:
                 est_g = a0.to(est_g).bmm(est_g)
@@ -247,7 +244,6 @@ class SolveRegistration(torch.nn.Module):
         except RuntimeError as err:
             # singular...?
             self.last_err = err
-            print(err)
             f1 = self.encoder(p1)  # [B, N, 3] -> [B, K]
             r = f1 - f0
             self.ptnet.train(training)

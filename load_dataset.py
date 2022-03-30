@@ -223,7 +223,6 @@ class TransformedDataset(torch.utils.data.Dataset):
             p0 = points
 
         # p0: template, p1: source, igt: transform matrix from p1 to p0
-        # return {"p0":p0, "p1":p1, "igt":igt, "coords":coords, "df":df, "inputs":inputs} # return type: tuple
         return p0, p1, igt, coords, df, inputs
 
 

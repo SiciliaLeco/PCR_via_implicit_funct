@@ -62,7 +62,7 @@ for epoch in range(30):
         df_gt = batch.get('df')#(Batch,num_points)
         inputs = batch.get('inputs')
 
-        df_pred = net(p,inputs) #(Batch,num_points)
+        df_pred = net(p, inputs) #(Batch,num_points)
 
         loss_i = torch.nn.L1Loss(reduction='none')(torch.clamp(df_pred, max=0.1),torch.clamp(df_gt, max=0.1))# out = (B,num_points) by componentwise comparing vecots of size num_samples:
         loss = loss_i.sum(-1).mean()# out = (B,num_points) by componentwise comparing vecots of size num_samples:
